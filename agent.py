@@ -44,6 +44,8 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "outfit_suggestion": None,   # string returned by suggest_outfit
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
+        "fallback_attempts": [],     # filters relaxed during retry ("removed size filter", etc.)
+        "fallback_message": None,    # human-readable note shown when a retry succeeds
     }
 
 
@@ -90,6 +92,20 @@ def _parse_query(query: str) -> dict:
 
     description = re.sub(r'\s+', ' ', text).strip().strip(',').strip()
     return {"description": description, "size": size, "max_price": max_price}
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _keyword_score(item: dict, keywords: list[str]) -> int:
+    """Count how many keywords from the query appear in the item's searchable text."""
+    if not keywords:
+        return 0
+    text = " ".join([
+        item.get("title", ""),
+        item.get("description", ""),
+        " ".join(item.get("style_tags", [])),
+    ]).lower()
+    return sum(1 for kw in keywords if kw in text)
 
 
 # ── planning loop ─────────────────────────────────────────────────────────────
@@ -145,16 +161,64 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     parsed = _parse_query(query)
     session["parsed"] = parsed
 
-    # Step 3 — search; stop early if nothing matches
-    results = search_listings(
-        parsed["description"], parsed["size"], parsed["max_price"]
-    )
+    description = parsed["description"]
+    size = parsed["size"]
+    max_price = parsed["max_price"]
+
+    # Step 3 — search; retry with progressively relaxed filters if needed
+    results = search_listings(description, size, max_price)
     session["search_results"] = results
+
+    keywords = description.lower().split()
+
+    if not results:
+        # Retry 1: remove size filter (keep price)
+        if size is not None:
+            results = search_listings(description, None, max_price)
+            session["fallback_attempts"].append("removed size filter")
+            if results:
+                session["search_results"] = results
+                session["fallback_message"] = (
+                    "No exact matches were found, so I removed the size filter "
+                    "and found a similar item."
+                )
+
+        # Retry 2: remove price filter (size already None from retry 1 or never set)
+        if not results and max_price is not None:
+            results = search_listings(description, None, None)
+            session["fallback_attempts"].append("removed price filter")
+            if results:
+                session["search_results"] = results
+                if size is not None:
+                    session["fallback_message"] = (
+                        "No exact matches were found, so I removed the size and price "
+                        "filters and found a similar item."
+                    )
+                else:
+                    session["fallback_message"] = (
+                        "No exact matches were found, so I removed the price filter "
+                        "and found a similar item."
+                    )
+
+    elif max_price is not None and keywords:
+        # Quality check: if the top result is a partial keyword match and removing
+        # the price filter would surface a fully-matching item, prefer the better result.
+        current_score = _keyword_score(results[0], keywords)
+        if current_score < len(keywords):
+            better = search_listings(description, size, None)
+            if better and _keyword_score(better[0], keywords) > current_score:
+                results = better
+                session["fallback_attempts"].append("removed price filter")
+                session["search_results"] = results
+                session["fallback_message"] = (
+                    "No items fully matched your search under your budget, so I removed "
+                    "the price filter and found a closer match."
+                )
 
     if not results:
         session["error"] = (
-            "No listings matched your search. Try a different description, "
-            "remove the size filter, or raise your budget."
+            "No listings matched your search, even after relaxing the size and "
+            "price filters. Try a broader description."
         )
         return session
 

@@ -86,3 +86,37 @@ def test_run_agent_no_results_does_not_call_downstream_tools():
     session = run_agent("unicorn spacesuit", get_empty_wardrobe())
     assert session["search_results"] == []
     assert session["fit_card"] is None
+
+
+# ── run_agent: retry / fallback behavior ─────────────────────────────────────
+
+def test_retry_removes_size_filter():
+    """Retry 1 drops the size filter and finds results when the size is unrecognized."""
+    # "W99" doesn't exist in the dataset so the first search returns [].
+    # Retry 1 removes size but keeps max_price=50 and finds vintage graphic tees.
+    session = run_agent("vintage graphic tee size W99 under $50", get_example_wardrobe())
+    assert session["error"] is None
+    assert session["selected_item"] is not None
+    assert "removed size filter" in session["fallback_attempts"]
+    assert session["fallback_message"] is not None
+
+
+def test_retry_removes_price_filter():
+    """Retry 2 drops the price filter and finds results when the budget is too low."""
+    # No size in this query so retry 1 is skipped.
+    # Under $1 matches nothing; retry 2 removes the price ceiling and finds results.
+    session = run_agent("vintage graphic tee under $1", get_example_wardrobe())
+    assert session["error"] is None
+    assert session["selected_item"] is not None
+    assert "removed price filter" in session["fallback_attempts"]
+    assert session["fallback_message"] is not None
+
+
+def test_all_retries_fail_sets_final_error():
+    """When no retry succeeds, the final broad-search error message is set."""
+    # "designer ballgown" matches nothing in the dataset even without filters.
+    session = run_agent("designer ballgown size M under $30", get_example_wardrobe())
+    assert session["error"] is not None
+    assert "broader description" in session["error"]
+    assert session["selected_item"] is None
+    assert session["fit_card"] is None

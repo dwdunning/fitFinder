@@ -59,7 +59,7 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
 
     item = session["selected_item"]
     style_tags = item.get("style_tags", [])
-    listing_text = (
+    item_details = (
         f"Title: {item.get('title', 'Unknown')}\n"
         f"Price: ${item.get('price', 0):.2f}\n"
         f"Condition: {item.get('condition', 'Unknown').capitalize()}\n"
@@ -67,6 +67,11 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
         f"Category: {item.get('category', 'Unknown')}\n"
         f"Style Tags: {', '.join(style_tags) if style_tags else 'None'}"
     )
+
+    if session["fallback_message"]:
+        listing_text = f"Fallback: {session['fallback_message']}\n\n{item_details}"
+    else:
+        listing_text = item_details
 
     return listing_text, session["outfit_suggestion"], session["fit_card"]
 

@@ -68,17 +68,30 @@ The agent runs a sequential, conditional loop. Each step checks its result befor
 4.  Call search_listings(description, size, max_price)
 5.  Store results in session["search_results"]
 6.  If results is [] →
-        session["error"] = "No listings matched..."
-        return session   ← stops here; does not call suggest_outfit or create_fit_card
-7.  session["selected_item"] = results[0]
-8.  Call suggest_outfit(selected_item, wardrobe)
-9.  session["outfit_suggestion"] = returned string
-10. Call create_fit_card(outfit_suggestion, selected_item)
-11. session["fit_card"] = returned caption
-12. Return session
+        If size is set: retry with size=None (keep max_price)
+            → record "removed size filter" in session["fallback_attempts"]
+            → if retry finds results: set session["fallback_message"], continue
+        If results still []: retry with size=None AND max_price=None
+            → record "removed price filter" in session["fallback_attempts"]
+            → if retry finds results: set session["fallback_message"], continue
+        If results still []: set session["error"] and return early
+7.  Else if results is non-empty but top result is a partial keyword match
+    AND max_price is set →
+        Retry with max_price=None (keep size)
+        If the no-price top result scores higher: use it, record "removed price filter",
+        set session["fallback_message"] = "No items fully matched your search under
+        your budget, so I removed the price filter and found a closer match."
+8.  session["selected_item"] = results[0]
+9.  Call suggest_outfit(selected_item, wardrobe)
+10. session["outfit_suggestion"] = returned string
+11. Call create_fit_card(outfit_suggestion, selected_item)
+12. session["fit_card"] = returned caption
+13. Return session
 ```
 
-**When search returns no results:** The agent sets `session["error"]` to a helpful message and returns the session immediately. `session["selected_item"]`, `session["outfit_suggestion"]`, and `session["fit_card"]` all remain `None`. The caller can check `session["error"]` to distinguish this case from a successful run.
+**When search returns no results:** The agent attempts up to two retries before giving up — first removing the size filter, then the price filter. If a retry succeeds, `session["fallback_message"]` is set with a plain-English explanation and the loop continues normally. If all retries fail, `session["error"]` is set and downstream fields remain `None`.
+
+**When search returns a partial match:** If results exist but the top result doesn't match all query keywords (e.g., a search for "90s vintage jacket" returns a bucket hat because no jacket is under the price ceiling), the agent runs a quality-fallback: it retries without the price filter and replaces the partial result with the better one if the no-price top result scores higher. This is recorded in `session["fallback_attempts"]` and `session["fallback_message"]` the same way as the availability fallback.
 
 **Query parsing** (`_parse_query`) is deterministic — no LLM. It uses regex to extract:
 - Budget phrases: `"under $30"`, `"under 30"`, `"below $45"`, `"less than $25"`, or a bare `"$30"`
@@ -102,24 +115,46 @@ session = {
     "outfit_suggestion": None,  # string from suggest_outfit
     "fit_card": None,        # caption string from create_fit_card
     "error": None,           # set if interaction ended early
+    "fallback_attempts": [], # filters relaxed during retry: "removed size filter", "removed price filter"
+    "fallback_message": None,# human-readable explanation shown when a fallback result is used
 }
 ```
 
-Each tool reads its inputs from the session and writes its output back before the loop advances. This means tools can be called and tested independently by pre-populating the relevant keys. The `error` key being non-`None` is the signal that the interaction ended early — all downstream fields will be `None` in that case.
+Each tool reads its inputs from the session and writes its output back before the loop advances. This means tools can be called and tested independently by pre-populating the relevant keys. The `error` key being non-`None` is the signal that the interaction ended early — all downstream fields will be `None` in that case. When `fallback_message` is non-`None`, the Gradio listing panel prefixes the item details with `"Fallback: <message>"` so the user knows a filter was relaxed.
 
 ---
 
 ## Error Handling
 
-### `search_listings` — no results
+### `search_listings` — no results after retries
 
 **Query:** `"designer ballgown size XXS under $5"`
 
-The parser extracts `description="designer ballgown"`, `size="XXS"`, `max_price=5.0`. No listing in the dataset matches all three filters. `search_listings` returns `[]`.
+The parser extracts `description="designer ballgown"`, `size="XXS"`, `max_price=5.0`. No listing matches all three filters. The agent retries:
+- Retry 1: removes `size="XXS"` — still no ballgown listings. Records `"removed size filter"`.
+- Retry 2: removes `max_price=5.0` — still no ballgown listings. Records `"removed price filter"`.
 
-**Agent response:** The loop sets `session["error"] = "No listings matched your search. Try a different description, remove the size filter, or raise your budget."` and returns the session without calling `suggest_outfit` or `create_fit_card`.
+**Agent response:** `session["error"] = "No listings matched your search, even after relaxing the size and price filters. Try a broader description."` The session is returned without calling `suggest_outfit` or `create_fit_card`. In the Gradio UI, the error appears in the first panel; the other two are empty.
 
-In the Gradio UI, the error message appears in the first output panel and the other two panels are empty.
+---
+
+### `search_listings` — partial match / quality fallback
+
+**Query:** `"90s vintage jacket under $20"`
+
+The parser extracts `description="90s vintage jacket"`, `max_price=20.0`. The initial search finds items (a bucket hat scores 2/3 keywords — "90s" and "vintage" — and costs $14), but no jacket exists under $20 in the dataset. The top result is a partial match.
+
+**Agent response:** The quality-fallback fires: the agent retries without the price ceiling and finds the "90s Track Jacket — Navy/White Stripe" (score 3/3). It replaces the partial result with the jacket, records `"removed price filter"` in `session["fallback_attempts"]`, and sets `session["fallback_message"]`.
+
+In the Gradio UI the listing panel reads:
+
+```
+Fallback: No items fully matched your search under your budget, so I removed the price filter and found a closer match.
+
+Title: 90s Track Jacket — Navy/White Stripe
+Price: $45.00
+...
+```
 
 ---
 
@@ -176,16 +211,17 @@ This produced grammatically broken output like `"Pair this tops with complementa
 
 In addition to the required tests, I used repeated validation runs and targeted failure-mode tests to verify that changes to matching logic, query parsing, and fallback behavior did not break previously working scenarios.
 
-The project has **31 pytest tests** across two test files.
+The project has **34 pytest tests** across two test files.
 
 **`tests/test_tools.py` (17 tests)** covers each tool in isolation:
 - `search_listings`: valid query returns results, no-match returns `[]`, price filter excludes over-budget items, results are dicts with expected keys, empty description returns `[]`, relevance ordering.
 - `suggest_outfit`: non-empty return with example wardrobe, non-empty return with empty wardrobe, no crash on malformed `new_item`, never returns `None`, wardrobe item name appears in result.
 - `create_fit_card`: valid input returns non-empty string, empty outfit returns exact error string, whitespace outfit returns same error string, malformed item does not crash, title or price appears in output.
 
-**`tests/test_agent.py` (14 tests)** covers the parser and planning loop:
+**`tests/test_agent.py` (17 tests)** covers the parser and planning loop:
 - `_parse_query`: six price format cases (`under $30`, `under 30`, `$30`, `below $45`, `less than $25`, no price), three size cases, three description-cleaning cases, one full multi-part query.
-- `run_agent`: no-results path sets `session["error"]` and leaves `selected_item`, `outfit_suggestion`, and `fit_card` as `None`; a second no-results test confirms `search_results` is `[]` and `fit_card` is untouched.
+- `run_agent` — no-results paths: error is set and downstream fields stay `None`; a second test confirms `search_results` is `[]` and `fit_card` is untouched.
+- `run_agent` — fallback paths: retry succeeds after removing size filter; retry succeeds after removing price filter; all retries fail and the final error message is set.
 
 Run all tests from the project root:
 
