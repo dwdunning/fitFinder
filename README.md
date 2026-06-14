@@ -301,4 +301,52 @@ Query:
 Result:
 No items fully matched under the user's budget, so the agent removed the price filter and returned the closest matching 90s jacket available.
 
+## Stretch Feature: Price Comparison Tool
+
+### Purpose
+
+I added a fourth tool, `compare_price(new_item)`, that evaluates whether a listing appears to be a good value compared to similar items in the dataset.
+
+### How It Works
+
+When the agent selects an item from `search_listings`, it calls `compare_price(new_item)` before generating the outfit suggestion.
+
+The tool:
+
+1. Loads all listings from the dataset using `load_listings()`.
+2. Finds comparable listings in the same category.
+3. Excludes the selected item from the comparison set.
+4. Calculates the average price of the comparable listings.
+5. Compares the selected item's price against that average.
+6. Returns a short assessment explaining whether the item is below average, near average, or above average in price.
+
+### Example
+
+Selected item:
+
+```text
+90s Track Jacket — Navy/White Stripe
+Price: $45.00
+```
+
+Price assessment:
+
+```text
+This item costs $45.00. Comparable outerwear average $43.86 This item is priced near average.
+```
+
+### Failure Handling
+
+If there are not enough comparable listings to make a meaningful comparison, the tool returns:
+
+```text
+Not enough comparable listings were found to make a reliable price assessment.
+```
+
+instead of raising an exception.
+
+### How It Is Displayed
+
+The price assessment appears in the listing panel beneath the item details so the user can evaluate whether the listing is a good deal before deciding whether to purchase it.
+
 
