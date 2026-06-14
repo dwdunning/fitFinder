@@ -18,6 +18,8 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import re
+
 from tools import search_listings, suggest_outfit, create_fit_card
 
 
@@ -43,6 +45,51 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
     }
+
+
+# ── query parser ─────────────────────────────────────────────────────────────
+
+def _parse_query(query: str) -> dict:
+    """
+    Extract description, size, and max_price from a natural language query.
+    No LLM — deterministic regex only.
+
+    Handles:
+        max_price: "under $30", "under 30", "below $45", "less than $25", "$30"
+        size:      "size M", "size 8", "size S/M"
+
+    Returns a dict with keys: description (str), size (str|None), max_price (float|None).
+    """
+    text = query.strip()
+    size = None
+    max_price = None
+
+    # 1. Extract size phrase (e.g., "size M", "size 8", "size S/M")
+    size_match = re.search(
+        r'\bsize\s+([A-Za-z0-9]+(?:/[A-Za-z0-9]+)?)\b', text, re.IGNORECASE
+    )
+    if size_match:
+        size = size_match.group(1)
+        text = text[:size_match.start()] + text[size_match.end():]
+
+    # 2. Keyword-led budget phrase: "under/below/less than" + optional "$" + number
+    #    No trailing \b — the dollar sign between \s+ and \d+ breaks that assertion.
+    budget_match = re.search(
+        r'\b(?:under|below|less\s+than)\s+(?:\$)?(\d+(?:\.\d+)?)',
+        text, re.IGNORECASE
+    )
+    if budget_match:
+        max_price = float(budget_match.group(1))
+        text = text[:budget_match.start()] + text[budget_match.end():]
+    else:
+        # 3. Fallback: bare dollar amount ("$30")
+        dollar_match = re.search(r'\$(\d+(?:\.\d+)?)', text)
+        if dollar_match:
+            max_price = float(dollar_match.group(1))
+            text = text[:dollar_match.start()] + text[dollar_match.end():]
+
+    description = re.sub(r'\s+', ' ', text).strip().strip(',').strip()
+    return {"description": description, "size": size, "max_price": max_price}
 
 
 # ── planning loop ─────────────────────────────────────────────────────────────
@@ -92,9 +139,38 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 2 — parse the query into description, size, max_price
+    parsed = _parse_query(query)
+    session["parsed"] = parsed
+
+    # Step 3 — search; stop early if nothing matches
+    results = search_listings(
+        parsed["description"], parsed["size"], parsed["max_price"]
+    )
+    session["search_results"] = results
+
+    if not results:
+        session["error"] = (
+            "No listings matched your search. Try a different description, "
+            "remove the size filter, or raise your budget."
+        )
+        return session
+
+    # Step 4 — select the top result
+    session["selected_item"] = results[0]
+
+    # Step 5 — suggest an outfit
+    session["outfit_suggestion"] = suggest_outfit(
+        session["selected_item"], session["wardrobe"]
+    )
+
+    # Step 6 — generate the caption
+    session["fit_card"] = create_fit_card(
+        session["outfit_suggestion"], session["selected_item"]
+    )
+
     return session
 
 
