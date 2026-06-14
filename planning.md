@@ -220,3 +220,51 @@ A social-media-style caption, for example:
 `"Vintage grunge fit: faded graphic tee + baggy dark wash jeans + chunky sneakers. Layer the black denim jacket and you're done. Grab this tee for $24 on depop before it's gone."`
 
 **What happens if search returns nothing:** If the user had said "under $5" instead, `search_listings` would return `[]`. The loop would stop after step 1, set `state["error"]`, and the agent would respond: "No vintage graphic tees under $5 were found. Try raising your budget or broadening your description." `suggest_outfit` and `create_fit_card` would never be called.
+
+
+## Stretch Feature: Retry Logic with Fallback
+
+### Feature Goal
+
+If the first call to `search_listings(description, size, max_price)` returns no matches, the agent will automatically retry with loosened constraints before giving up. The goal is to keep the agent useful when the user's first search is too narrow.
+
+### Planning Loop Change
+
+After the first `search_listings()` call:
+
+1. If results exist, continue as normal.
+2. If results are empty and `size` is not `None`, retry with `size=None` while keeping the same description and max price.
+3. If results are still empty and `max_price` is not `None`, retry with `max_price=None` while keeping the same description and no size filter.
+4. If retry results exist, store them in `state["search_results"]`, set `state["selected_item"] = results[0]`, and continue to `suggest_outfit`.
+5. If retry results are still empty, set `state["error"]` and return early.
+
+### State Management Additions
+
+Add:
+
+```python
+state["fallback_attempts"] = []
+state["fallback_message"] = None
+```
+
+`fallback_attempts` stores which constraints were loosened, such as `"removed size filter"` or `"removed price filter"`.
+
+`fallback_message` stores a user-facing explanation, such as:
+
+```text
+No exact matches found, so I retried without the size filter and found a similar item.
+```
+
+### Error Handling
+
+If no results are found even after retrying, the agent responds:
+
+```text
+No listings matched your search, even after relaxing the size and price filters. Try a broader description.
+```
+
+If retry succeeds, the agent continues the workflow but tells the user what changed.
+
+### AI Tool Plan for Stretch
+
+I will give Claude this stretch feature section, the existing Planning Loop section, and the current `run_agent()` implementation. I expect Claude to update only the no-results branch in `agent.py`, add state fields for fallback attempts/messages, and preserve the rule that `suggest_outfit()` and `create_fit_card()` are only called if search results exist. I will verify it with one query that succeeds normally, one query that succeeds only after a fallback retry, and one query that still fails after all retries.
