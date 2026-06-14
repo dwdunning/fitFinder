@@ -10,6 +10,7 @@ Tools:
     search_listings(description, size, max_price)  → list[dict]
     suggest_outfit(new_item, wardrobe)              → str
     create_fit_card(outfit, new_item)               → str
+    compare_price(new_item)                         → str
 """
 
 import os
@@ -265,3 +266,53 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
         return result if result else fallback
     except Exception:
         return fallback
+
+
+# ── Tool 4: compare_price ─────────────────────────────────────────────────────
+
+_NOT_ENOUGH = (
+    "Not enough comparable listings were found to make a reliable price assessment."
+)
+
+def compare_price(new_item: dict) -> str:
+    """
+    Compare the selected item's price against other listings in the same category.
+
+    Args:
+        new_item: A listing dict. Requires 'id', 'price', and 'category'.
+
+    Returns:
+        A human-readable price assessment string. Returns a sentinel message if
+        fewer than 3 comparable items exist or if required fields are missing.
+        Never raises an exception.
+    """
+    price = new_item.get("price")
+    category = new_item.get("category", "")
+    item_id = new_item.get("id")
+
+    if price is None or not category:
+        return _NOT_ENOUGH
+
+    listings = load_listings()
+    comparables = [
+        l for l in listings
+        if l.get("category") == category and l.get("id") != item_id
+    ]
+
+    if len(comparables) < 3:
+        return _NOT_ENOUGH
+
+    avg = sum(l["price"] for l in comparables) / len(comparables)
+
+    if price < avg:
+        verdict = "This item is priced below average and appears to be a good value."
+    elif price > avg:
+        verdict = "This item is priced above average."
+    else:
+        verdict = "This item is priced at the category average."
+
+    return (
+        f"This item costs ${price:.2f}. "
+        f"Comparable {category} average ${avg:.2f}. "
+        f"{verdict}"
+    )

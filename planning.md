@@ -67,9 +67,28 @@ If `outfit` is `None` or an empty string, the tool returns `"Could not generate 
 
 ---
 
-### Additional Tools (if any)
+### Tool 4: compare_price
 
-None planned for Milestone 1–4.
+**What it does:**
+Loads all listings using `load_listings()` and finds comparable listings — those sharing the same `category` as the selected item, excluding the item itself (matched by `id`). Computes the average price of those comparables and returns a one-sentence human-readable verdict: below average (potential good value), at average, or above average. Never raises an exception — a malformed item or too-small comparison pool returns a sentinel message instead.
+
+**Input parameters:**
+- `new_item` (dict): the selected listing dict as returned by `search_listings`. Requires `id`, `price`, and `category` for a meaningful result. All field access uses `.get()` so a missing or empty dict returns the sentinel rather than crashing.
+
+**What it returns:**
+A non-empty string. Examples:
+- `"This item costs $18.00. Comparable tops average $24.50. This item is priced below average and appears to be a good value."`
+- `"This item costs $45.00. Comparable outerwear average $32.00. This item is priced above average."`
+
+If fewer than 3 comparable items exist in the dataset (same category, different `id`):
+`"Not enough comparable listings were found to make a reliable price assessment."`
+
+**What happens if it fails or returns nothing:**
+Never raises an exception. If `price` is `None`, `category` is missing, or fewer than 3 comparables are found, returns the sentinel message above. The planning loop treats this identically to a successful call — the result is stored in `session["price_assessment"]` and the workflow continues unchanged.
+
+---
+
+### Additional Tools
 
 ---
 
@@ -84,20 +103,30 @@ The loop runs sequentially. Each step checks its result before continuing. If a 
 2.  Initialize state["wardrobe"] via get_example_wardrobe() or get_empty_wardrobe()
 3.  Call search_listings(description, size, max_price)
 4.  If results is [] →
-        state["error"] = "No listings matched. Try a different description,
-                          remove the size filter, or raise your budget."
-        return state  ← stop here, do not call suggest_outfit or create_fit_card
-5.  If results exist →
-        state["search_results"] = results
-        state["selected_item"] = results[0]
-6.  Call suggest_outfit(state["selected_item"], state["wardrobe"])
-7.  state["outfit_suggestion"] = returned string
-8.  Call create_fit_card(state["outfit_suggestion"], state["selected_item"])
-9.  state["fit_card"] = returned caption string
+        If size is not None: retry with size=None (keep max_price)
+            → record "removed size filter" in state["fallback_attempts"]
+            → if retry succeeds: set state["fallback_message"] and continue
+        If results still []: retry with max_price=None (size already None)
+            → record "removed price filter" in state["fallback_attempts"]
+            → if retry succeeds: set state["fallback_message"] and continue
+        If results still []:
+            state["error"] = "No listings matched, even after relaxing filters."
+            return state  ← stop here
+5.  If results are non-empty but top result is a partial keyword match AND max_price is set:
+        Retry without max_price — if better result found, use it, record "removed price filter",
+        set state["fallback_message"] = "No items fully matched your search under your budget..."
+6.  state["search_results"] = results
+    state["selected_item"] = results[0]
+7.  Call compare_price(state["selected_item"])
+    state["price_assessment"] = returned string
+8.  Call suggest_outfit(state["selected_item"], state["wardrobe"])
+    state["outfit_suggestion"] = returned string
+9.  Call create_fit_card(state["outfit_suggestion"], state["selected_item"])
+    state["fit_card"] = returned caption string
 10. Return state
 ```
 
-The agent knows it is done when step 9 completes. There is no retry logic — bad results are surfaced to the user rather than silently retried.
+The agent knows it is done when step 9 completes. If no results are found even after retries, it returns early at step 4 with `state["error"]` set. `compare_price`, `suggest_outfit`, and `create_fit_card` are only ever called when a selected item exists.
 
 ---
 
@@ -116,9 +145,12 @@ state = {
     "wardrobe": {},           # loaded at session start
     "search_results": [],     # list of dicts returned by search_listings
     "selected_item": None,    # single dict chosen from search_results
+    "price_assessment": None, # string returned by compare_price
     "outfit_suggestion": None,  # string returned by suggest_outfit
     "fit_card": None,         # caption string returned by create_fit_card
     "error": None,            # set if any step hits a stop condition
+    "fallback_attempts": [],  # filters relaxed during retry: "removed size filter", etc.
+    "fallback_message": None, # user-facing explanation when a fallback result is used
 }
 ```
 
@@ -146,13 +178,16 @@ For each tool, describe the specific failure mode you're handling and what the a
 ```mermaid
 flowchart TD
     A[User Input] --> B[Planning Loop\nParse: description, size, max_price\nLoad wardrobe into state]
-    B <-.->|read/write| SS[(Session State\nquery · wardrobe\nsearch_results · selected_item\noutfit_suggestion · fit_card · error)]
+    B <-.->|read/write| SS[(Session State\nquery · wardrobe · search_results\nselected_item · price_assessment\noutfit_suggestion · fit_card\nfallback_attempts · fallback_message · error)]
     B --> C[search_listings\ndescription · size · max_price]
     C <-.->|write results| SS
-    C --> D{results empty?}
-    D -- Yes --> E[state error = no matches message\nReturn state to user]
-    D -- No --> F[state selected_item = results 0]
-    F --> G[suggest_outfit\nnew_item = selected_item\nwardrobe = state wardrobe]
+    C --> D{results empty\nor partial match?}
+    D -- Empty: retry filters --> C
+    D -- All retries fail --> E[state error = no matches message\nReturn state to user]
+    D -- Results found --> F[state selected_item = results 0]
+    F --> CP[compare_price\nnew_item = selected_item]
+    CP <-.->|write price_assessment| SS
+    CP --> G[suggest_outfit\nnew_item = selected_item\nwardrobe = state wardrobe]
     G --> H{wardrobe empty?}
     H -- Yes --> I[General styling advice\nbased on new_item style_tags]
     H -- No --> J[Outfit using matching\nwardrobe items]
@@ -268,3 +303,27 @@ If retry succeeds, the agent continues the workflow but tells the user what chan
 ### AI Tool Plan for Stretch
 
 I will give Claude this stretch feature section, the existing Planning Loop section, and the current `run_agent()` implementation. I expect Claude to update only the no-results branch in `agent.py`, add state fields for fallback attempts/messages, and preserve the rule that `suggest_outfit()` and `create_fit_card()` are only called if search results exist. I will verify it with one query that succeeds normally, one query that succeeds only after a fallback retry, and one query that still fails after all retries.
+
+## Stretch Feature: Price Comparison Tool
+
+See full tool spec under **Tool 4: compare_price** in the Tools section above.
+
+### Planning Loop Change
+
+After `state["selected_item"]` is set, call `compare_price(state["selected_item"])` and store the result in `state["price_assessment"]`. This call never stops the loop — even the sentinel "not enough data" message is stored and displayed to the user.
+
+### State Management Additions
+
+Added `"price_assessment": None` to the session dict (see State Management section above).
+
+### Gradio UI Change
+
+`app.py` appends the `price_assessment` string to the bottom of the listing panel (after the item details) so the price verdict is visible alongside the item.
+
+### Error Handling
+
+`compare_price` has one failure mode: fewer than 3 comparable listings in the same category exist in the dataset. Response: return the sentinel string `"Not enough comparable listings were found to make a reliable price assessment."` The workflow continues — this is not a stop condition.
+
+### AI Tool Plan for Stretch
+
+I will give Claude this stretch feature section, the full Tool 4 spec from the Tools section, and the current `run_agent()` and `_new_session()` implementations. I expect Claude to add `compare_price` to `tools.py`, add `"price_assessment"` to `_new_session()`, insert a single `compare_price` call in `run_agent()` between selecting the item and calling `suggest_outfit`, and update `app.py` to append the assessment to the listing panel. I will verify with a query that returns a real item in a well-populated category and confirm the assessment mentions both the item price and the average comparable price.

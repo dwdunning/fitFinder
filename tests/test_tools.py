@@ -6,7 +6,7 @@ Run from the project root: pytest tests/test_tools.py -v
 """
 
 import pytest
-from tools import search_listings, suggest_outfit, create_fit_card
+from tools import search_listings, suggest_outfit, create_fit_card, compare_price
 from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
 
 
@@ -178,3 +178,41 @@ def test_create_fit_card_output_includes_title_or_price():
     assert title in result or price_fragment in result, (
         f"Expected item title or price in caption.\nGot: {result}"
     )
+
+
+# ── compare_price tests ───────────────────────────────────────────────────────
+
+def test_compare_price_valid_assessment():
+    """A real item in a well-populated category returns a non-empty assessment string."""
+    items = search_listings("vintage graphic tee", size=None, max_price=None)
+    assert items, "search_listings returned no results — check the dataset"
+    result = compare_price(items[0])
+    assert isinstance(result, str)
+    assert len(result.strip()) > 0
+
+
+def test_compare_price_insufficient_comparables():
+    """An item whose category has fewer than 3 other listings returns the sentinel."""
+    rare_item = {"id": "fake-99", "price": 25.0, "category": "unicorn wear"}
+    result = compare_price(rare_item)
+    assert result == (
+        "Not enough comparable listings were found to make a reliable price assessment."
+    )
+
+
+def test_compare_price_malformed_item():
+    """An empty dict does not raise and returns the sentinel string."""
+    result = compare_price({})
+    assert isinstance(result, str)
+    assert len(result.strip()) > 0
+
+
+def test_compare_price_output_contains_average_reasoning():
+    """The assessment must mention both the item price and a comparable average."""
+    items = search_listings("vintage graphic tee", size=None, max_price=None)
+    assert items, "search_listings returned no results — check the dataset"
+    item = items[0]
+    result = compare_price(item)
+    price_str = f"${item['price']:.2f}"
+    assert price_str in result, f"Expected item price {price_str!r} in result.\nGot: {result}"
+    assert "average" in result.lower(), f"Expected 'average' in result.\nGot: {result}"

@@ -6,9 +6,9 @@ A multi-tool AI agent for secondhand outfit discovery. Built for CodePath AI201.
 
 ## Project Overview
 
-FitFindr takes a natural-language shopping request and runs it through a three-step planning loop: it searches a dataset of 40 mock secondhand listings for items that match the user's description, size, and budget; asks an LLM to suggest a complete outfit by pairing the top result with the user's existing wardrobe; and generates a short social-media-style caption for the look. The whole interaction is surfaced through a Gradio interface with three output panels.
+FitFindr takes a natural-language shopping request and runs it through a four-step planning loop: it searches a dataset of 40 mock secondhand listings for items that match the user's description, size, and budget; compares the selected item's price against similar listings in the same category; asks an LLM to suggest a complete outfit by pairing the top result with the user's existing wardrobe; and generates a short social-media-style caption for the look. The whole interaction is surfaced through a Gradio interface with three output panels.
 
-The agent is designed to fail gracefully at every step. If no listings match, the loop stops immediately. If the wardrobe is empty, the outfit tool still returns useful general styling advice. If the LLM is unavailable, each tool falls back to a deterministic response built from the item data.
+The agent is designed to fail gracefully at every step. If no listings match, it retries with relaxed filters before giving up. If the wardrobe is empty, the outfit tool still returns useful general styling advice. If the LLM is unavailable, each tool falls back to a deterministic response built from the item data.
 
 ---
 
@@ -57,6 +57,23 @@ The agent is designed to fail gracefully at every step. If no listings match, th
 
 ---
 
+### `compare_price(new_item)`
+
+**Purpose:** Compares the selected item's price against other listings in the same category to give the user a quick value verdict.
+
+**Inputs:**
+- `new_item` (dict) — the selected listing dict. Requires `id`, `price`, and `category`. All fields accessed with `.get()`.
+
+**Output:** A one-to-two sentence string. Examples:
+- `"This item costs $18.00. Comparable tops average $24.50. This item is priced below average and appears to be a good value."`
+- `"This item costs $45.00. Comparable outerwear average $32.00. This item is priced above average."`
+
+If fewer than 3 comparable listings exist in the dataset (same category, different `id`), returns: `"Not enough comparable listings were found to make a reliable price assessment."`
+
+**Failure handling:** Never raises an exception. Missing `price`, missing `category`, or too few comparables all return the sentinel string above. The planning loop always continues — this is not a stop condition.
+
+---
+
 ## Planning Loop
 
 The agent runs a sequential, conditional loop. Each step checks its result before the next step is called.
@@ -82,11 +99,13 @@ The agent runs a sequential, conditional loop. Each step checks its result befor
         set session["fallback_message"] = "No items fully matched your search under
         your budget, so I removed the price filter and found a closer match."
 8.  session["selected_item"] = results[0]
-9.  Call suggest_outfit(selected_item, wardrobe)
-10. session["outfit_suggestion"] = returned string
-11. Call create_fit_card(outfit_suggestion, selected_item)
-12. session["fit_card"] = returned caption
-13. Return session
+9.  Call compare_price(selected_item)
+10. session["price_assessment"] = returned string
+11. Call suggest_outfit(selected_item, wardrobe)
+12. session["outfit_suggestion"] = returned string
+13. Call create_fit_card(outfit_suggestion, selected_item)
+14. session["fit_card"] = returned caption
+15. Return session
 ```
 
 **When search returns no results:** The agent attempts up to two retries before giving up — first removing the size filter, then the price filter. If a retry succeeds, `session["fallback_message"]` is set with a plain-English explanation and the loop continues normally. If all retries fail, `session["error"]` is set and downstream fields remain `None`.
@@ -112,6 +131,7 @@ session = {
     "search_results": [],    # list of listing dicts from search_listings
     "selected_item": None,   # single listing dict (first result)
     "wardrobe": {},          # user's wardrobe dict
+    "price_assessment": None,# string from compare_price (value verdict)
     "outfit_suggestion": None,  # string from suggest_outfit
     "fit_card": None,        # caption string from create_fit_card
     "error": None,           # set if interaction ended early
@@ -211,12 +231,13 @@ This produced grammatically broken output like `"Pair this tops with complementa
 
 In addition to the required tests, I used repeated validation runs and targeted failure-mode tests to verify that changes to matching logic, query parsing, and fallback behavior did not break previously working scenarios.
 
-The project has **34 pytest tests** across two test files.
+The project has **38 pytest tests** across two test files.
 
-**`tests/test_tools.py` (17 tests)** covers each tool in isolation:
+**`tests/test_tools.py` (21 tests)** covers each tool in isolation:
 - `search_listings`: valid query returns results, no-match returns `[]`, price filter excludes over-budget items, results are dicts with expected keys, empty description returns `[]`, relevance ordering.
 - `suggest_outfit`: non-empty return with example wardrobe, non-empty return with empty wardrobe, no crash on malformed `new_item`, never returns `None`, wardrobe item name appears in result.
 - `create_fit_card`: valid input returns non-empty string, empty outfit returns exact error string, whitespace outfit returns same error string, malformed item does not crash, title or price appears in output.
+- `compare_price`: valid assessment returned for a real item; sentinel returned when category has fewer than 3 comparables; malformed item does not crash; output contains both the item price and the word "average".
 
 **`tests/test_agent.py` (17 tests)** covers the parser and planning loop:
 - `_parse_query`: six price format cases (`under $30`, `under 30`, `$30`, `below $45`, `less than $25`, no price), three size cases, three description-cleaning cases, one full multi-part query.
@@ -259,3 +280,25 @@ Run all tests:
 ```bash
 pytest tests/ -v
 ```
+
+
+## Stretch Feature: Retry Logic with Fallback
+
+If search_listings returns no results, the agent automatically retries with relaxed constraints before ending the interaction.
+
+Current fallback order:
+
+1. Remove the size filter.
+2. If still no results, remove the price filter.
+
+If a retry succeeds, the agent stores a fallback message in session state and informs the user which constraint was removed. If all retries fail, the agent returns the normal no-results error message.
+
+Example:
+
+Query:
+"vintage 90s jacket under $20"
+
+Result:
+No items fully matched under the user's budget, so the agent removed the price filter and returned the closest matching 90s jacket available.
+
+

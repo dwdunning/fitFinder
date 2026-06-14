@@ -20,7 +20,7 @@ Usage (once implemented):
 
 import re
 
-from tools import search_listings, suggest_outfit, create_fit_card
+from tools import search_listings, suggest_outfit, create_fit_card, compare_price
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -41,6 +41,7 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "search_results": [],        # list of matching listing dicts
         "selected_item": None,       # top result, passed into suggest_outfit
         "wardrobe": wardrobe,        # user's wardrobe dict
+        "price_assessment": None,    # string returned by compare_price
         "outfit_suggestion": None,   # string returned by suggest_outfit
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
@@ -224,6 +225,9 @@ def run_agent(query: str, wardrobe: dict) -> dict:
 
     # Step 4 — select the top result
     session["selected_item"] = results[0]
+
+    # Step 4b — price comparison
+    session["price_assessment"] = compare_price(session["selected_item"])
 
     # Step 5 — suggest an outfit
     session["outfit_suggestion"] = suggest_outfit(
